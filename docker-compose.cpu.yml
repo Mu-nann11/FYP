@@ -1,0 +1,12 @@
+services:
+  fiji-stitcher:
+    build: .
+    container_name: fiji-stitcher-cpu
+    working_dir: /app
+    environment:
+      FIJI_PATH: /opt/Fiji.app
+      FIJI_EXE: /opt/Fiji.app/ImageJ-linux64
+    volumes:
+      - ./data:/data
+      - ./results:/results
+      - ./fiji_config.json:/app/fiji_config.json

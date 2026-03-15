@@ -1,0 +1,51 @@
+{
+  "FIJI_PATH": "/opt/Fiji.app",
+  "FIJI_EXE": "/opt/Fiji.app/ImageJ-linux64",
+  "STITCHED_PARENT_DIR": "/results/stitched",
+  "DEFAULT_ROOT_DIR": "/data",
+  "RAW_DATA_DIR_NAME": "Raw_Data",
+  "AUTO_OPEN_RESULT": false,
+  "AUTO_USE_DEFAULT_PARAMS": true,
+  "DEFAULT_FUSION_METHOD": "Linear Blending",
+  "DEFAULT_REGRESSION_THRESHOLD": "0.30",
+  "DEFAULT_MAX_DISPLACEMENT": "2.50",
+  "DEFAULT_ABSOLUTE_DISPLACEMENT": "3.50",
+  "DEFAULT_COMPUTATION_MODE": "Save memory (but be slower)",
+  "DEFAULT_IMAGE_OUTPUT": "Write to disk",
+  "LOG_LEVEL": "INFO",
+  "INTERACTIVE": false,
+  "MAX_OPEN_FILES": 30,
+
+  "CROP_INPUT_DIR": "/results/stitched",
+  "CROP_OUTPUT_DIR": "/results/crop",
+  "CROP_MARGIN": 20,
+
+  "BATCH_OUTPUT_DIR": "/results/batch_features",
+  "BATCH_LOG_CSV": "batch_log.csv",
+  "BATCH_RESULT_CSV": "all_blocks_cell_features.csv",
+  "BATCH_STATE_CSV": "batch_state.csv",
+  "BATCH_OVERLAY_DIR": "overlays",
+  "BATCH_RESUME": true,
+  "BATCH_SAVE_OVERLAY": true,
+  "BATCH_DO_ALIGN": true,
+  "BATCH_SKIP_DONE": true,
+
+  "FEATURE_OUTPUT_DIR": "/results/compared_result",
+
+  "SEGMENTATION": {
+    "MODEL_TYPE": "nuclei",
+    "USE_GPU": false,
+    "DIAMETER": null,
+    "FLOW_THRESHOLD": 0.4,
+    "CELLPROB_THRESHOLD": 0.0,
+    "CHANNELS": [0, 0]
+  },
+
+  "LOADER": {
+    "CHANNELS": ["DAPI", "HER2", "PR", "ER"],
+    "DO_PREPROCESS": false,
+    "CLAHE_CLIP_LIMIT": 2.0,
+    "CLAHE_TILE_GRID_SIZE": [8, 8],
+    "GAUSSIAN_BLUR_KERNEL": [3, 3]
+  }
+}

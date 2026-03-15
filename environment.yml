@@ -1,0 +1,20 @@
+name: fiji-stitcher
+channels:
+  - conda-forge
+dependencies:
+  - python=3.9
+  - pip
+  - numpy
+  - pandas
+  - scipy
+  - tifffile
+  - scikit-image
+  - opencv
+  - openjdk=11
+  - pip:
+      - cellpose
+      - pyimagej
+      - imagej
+      - scyjava
+      - jpype1
+      - matplotlib
