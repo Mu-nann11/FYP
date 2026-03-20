@@ -229,7 +229,8 @@ def load_config(config_path=None):
 
 def apply_cli_overrides(config):
     cfg = copy.deepcopy(config)
-    args = set(sys.argv[1:])
+    argv = list(sys.argv[1:])
+    args = set(argv)
 
     if "--batch" in args:
         cfg["INTERACTIVE"] = False
@@ -243,5 +244,31 @@ def apply_cli_overrides(config):
         cfg["SEGMENTATION"]["USE_GPU"] = True
     if "--cpu" in args:
         cfg["SEGMENTATION"]["USE_GPU"] = False
+
+    def _get_value(flag: str):
+        if flag in argv:
+            i = argv.index(flag)
+            if i + 1 < len(argv):
+                return argv[i + 1]
+        for a in argv:
+            if a.startswith(flag + "="):
+                return a.split("=", 1)[1]
+        return None
+
+    channels_str = _get_value("--channels")
+    if channels_str:
+        parts = [p.strip() for p in str(channels_str).split(",")]
+        parts = [p for p in parts if p]
+        if parts:
+            cfg.setdefault("LOADER", {})
+            cfg["LOADER"]["CHANNELS"] = parts
+
+    level1 = _get_value("--level1")
+    if level1:
+        cfg["ONLY_LEVEL1"] = str(level1).strip()
+
+    ref_channel = _get_value("--ref-channel")
+    if ref_channel:
+        cfg["STITCH_REFERENCE_CHANNEL"] = str(ref_channel).strip()
 
     return cfg

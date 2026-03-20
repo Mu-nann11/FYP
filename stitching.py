@@ -110,6 +110,41 @@ run("Grid/Collection stitching",
     )
 
 
+def build_macro_command_from_tile_config(
+    input_dir,
+    output_dir,
+    layout_file,
+    params,
+):
+    input_dir_ij = str(Path(input_dir).resolve()).replace("\\", "/")
+    output_dir_ij = str(Path(output_dir).resolve()).replace("\\", "/")
+
+    return """
+run("Grid/Collection stitching",
+    "type=[Positions from file] " +
+    "order=[Defined by TileConfiguration] " +
+    "directory=[%s] " +
+    "layout_file=[%s] " +
+    "fusion_method=[%s] " +
+    "regression_threshold=%s " +
+    "max/avg_displacement_threshold=%s " +
+    "absolute_displacement_threshold=%s " +
+    "computation_parameters=[%s] " +
+    "image_output=[%s] " +
+    "output_directory=[%s]");
+""" % (
+        input_dir_ij,
+        layout_file,
+        params["fusion_method"],
+        params["regression_threshold"],
+        params["max_displacement"],
+        params["absolute_displacement"],
+        params["computation_mode"],
+        params["image_output"],
+        output_dir_ij,
+    )
+
+
 def execute_stitching_with_retry(ij, macro_cmd, logger, output_dir=None, max_retries=3):
     for attempt in range(max_retries):
         try:

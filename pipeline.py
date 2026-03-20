@@ -5,6 +5,7 @@ from .files import get_file_pattern, get_image_files
 from .stitching import (
     configure_stitching_parameters,
     build_macro_command,
+    build_macro_command_from_tile_config,
     execute_stitching_with_retry,
 )
 from .outputs import (
@@ -13,7 +14,20 @@ from .outputs import (
 )
 from .ui import timeout_input
 
-CHANNEL_ORDER = ["DAPI", "HER2", "PR", "ER"]
+DEFAULT_CHANNEL_ORDER = ["DAPI", "HER2", "PR", "ER"]
+
+
+def _channel_order_from_config(config):
+    try:
+        channels = config.get("LOADER", {}).get("CHANNELS", None)
+    except Exception:
+        channels = None
+
+    if not channels:
+        return DEFAULT_CHANNEL_ORDER
+
+    out = [str(c).strip() for c in channels if str(c).strip()]
+    return out if out else DEFAULT_CHANNEL_ORDER
 
 
 def run_stitch_for_channel(
@@ -24,6 +38,7 @@ def run_stitch_for_channel(
     ij,
     logger,
     output_dir,
+    layout_file=None,
 ):
     ch_dir = level1 / channel
     if not ch_dir.is_dir():
@@ -31,11 +46,13 @@ def run_stitch_for_channel(
         print("❌ 未找到通道目录: %s" % ch_dir)
         return False, None
 
-    pattern = get_file_pattern(str(ch_dir), interactive=config["INTERACTIVE"])
-    if not pattern:
-        logger.error("No pattern for %s", ch_dir)
-        print("❌ %s 下无法推断图像文件模式，跳过 %s" % (ch_dir, channel))
-        return False, None
+    pattern = None
+    if layout_file is None:
+        pattern = get_file_pattern(str(ch_dir), interactive=config["INTERACTIVE"])
+        if not pattern:
+            logger.error("No pattern for %s", ch_dir)
+            print("❌ %s 下无法推断图像文件模式，跳过 %s" % (ch_dir, channel))
+            return False, None
 
     img_files = get_image_files(str(ch_dir), pattern=pattern)
     if not img_files:
@@ -43,20 +60,28 @@ def run_stitch_for_channel(
         print("❌ %s 下未找到匹配 %s 的图像文件，跳过 %s" % (ch_dir, pattern, channel))
         return False, None
 
-    logger.info("Channel %s: found %s files (%s)", channel, len(img_files), pattern)
+    logger.info("Channel %s: found %s files (%s)", channel, len(img_files), pattern or "from tile config")
     print("ℹ️ 通道 %s：找到 %s 个匹配文件，开始拼接" % (channel, len(img_files)))
 
     fused_name = "%s_%s" % (level1.name, channel)
     tile_cfg_name = "TileConfiguration_%s.txt" % fused_name
     before_candidates = _snapshot_candidates(output_dir)
 
-    macro = build_macro_command(
-        input_dir=str(ch_dir),
-        output_dir=str(output_dir),
-        file_pattern=pattern,
-        params=params,
-        tile_config_name=tile_cfg_name,
-    )
+    if layout_file is None:
+        macro = build_macro_command(
+            input_dir=str(ch_dir),
+            output_dir=str(output_dir),
+            file_pattern=pattern,
+            params=params,
+            tile_config_name=tile_cfg_name,
+        )
+    else:
+        macro = build_macro_command_from_tile_config(
+            input_dir=str(ch_dir),
+            output_dir=str(output_dir),
+            layout_file=str(layout_file),
+            params=params,
+        )
     logger.debug("Macro for %s:\n%s", ch_dir, macro)
 
     ok = execute_stitching_with_retry(ij, macro, logger, output_dir=output_dir, max_retries=3)
@@ -117,6 +142,24 @@ def check_channel_sizes(results, logger):
     return False
 
 
+def _build_layout_file_from_reference(ref_registered_path, out_path, from_channel, to_channel):
+    src = Path(ref_registered_path)
+    dst = Path(out_path)
+    text = src.read_text(encoding="utf-8", errors="ignore")
+
+    from_suffix = f"_{from_channel}.tif"
+    to_suffix = f"_{to_channel}.tif"
+
+    lines = []
+    for line in text.splitlines():
+        if from_suffix in line:
+            lines.append(line.replace(from_suffix, to_suffix))
+        else:
+            lines.append(line)
+
+    dst.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def process_level1_sequential(level1_path, config, ij, logger):
     level1 = Path(level1_path)
     logger.info("Processing level1 (sequential, multi-channel): %s", level1)
@@ -134,7 +177,42 @@ def process_level1_sequential(level1_path, config, ij, logger):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     results = {}
-    for ch in CHANNEL_ORDER:
+    channels = _channel_order_from_config(config)
+    ref_channel = str(config.get("STITCH_REFERENCE_CHANNEL", "")).strip()
+    ref_registered = None
+
+    if ref_channel and ref_channel in channels:
+        ok, result = run_stitch_for_channel(
+            level1=level1,
+            channel=ref_channel,
+            params=params,
+            config=config,
+            ij=ij,
+            logger=logger,
+            output_dir=output_dir,
+        )
+        if ok and result is not None:
+            results[ref_channel] = result
+            ref_dir = level1 / ref_channel
+            ref_registered = ref_dir / f"TileConfiguration_{level1.name}_{ref_channel}.registered.txt"
+            if not ref_registered.exists():
+                ref_registered = None
+
+    for ch in channels:
+        if ch == ref_channel:
+            continue
+
+        layout_file = None
+        if ref_registered is not None:
+            ch_dir = level1 / ch
+            if ch_dir.is_dir():
+                layout_path = ch_dir / f"TileConfiguration_{level1.name}_{ch}.from_{ref_channel}.registered.txt"
+                try:
+                    _build_layout_file_from_reference(ref_registered, layout_path, ref_channel, ch)
+                    layout_file = layout_path.name
+                except Exception:
+                    layout_file = None
+
         ok, result = run_stitch_for_channel(
             level1=level1,
             channel=ch,
@@ -143,6 +221,7 @@ def process_level1_sequential(level1_path, config, ij, logger):
             ij=ij,
             logger=logger,
             output_dir=output_dir,
+            layout_file=layout_file,
         )
         if ok and result is not None:
             results[ch] = result
