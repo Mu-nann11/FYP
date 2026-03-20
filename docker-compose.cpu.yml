@@ -1,12 +1,24 @@
 services:
   fiji-stitcher:
-    build: .
+    build:
+      context: .
+      args:
+        DOWNLOAD_FIJI: "1"
     container_name: fiji-stitcher-cpu
     working_dir: /app
     environment:
       FIJI_PATH: /opt/Fiji.app
       FIJI_EXE: /opt/Fiji.app/ImageJ-linux64
     volumes:
+      - .:/app
       - ./data:/data
       - ./results:/results
       - ./fiji_config.json:/app/fiji_config.json
+      - cellpose_cache:/root/.cellpose
+      - torch_cache:/root/.cache/torch
+      - keras_cache:/root/.keras
+
+volumes:
+  cellpose_cache:
+  torch_cache:
+  keras_cache:

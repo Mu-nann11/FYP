@@ -1,8 +1,9 @@
 name: fiji-stitcher
 channels:
   - conda-forge
+  - defaults
 dependencies:
-  - python=3.9
+  - python=3.10
   - pip
   - numpy
   - pandas
@@ -12,9 +13,14 @@ dependencies:
   - opencv
   - openjdk=11
   - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu124
+      - torch==2.5.1+cu124
+      - torchvision==0.20.1+cu124
+      - torchaudio==2.5.1+cu124
       - cellpose
       - pyimagej
       - imagej
       - scyjava
       - jpype1
       - matplotlib
+      - openpyxl

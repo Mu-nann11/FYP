@@ -1,21 +1,26 @@
 services:
   fiji-stitcher:
-    build: .
+    build:
+      context: .
+      args:
+        DOWNLOAD_FIJI: "1"
     container_name: fiji-stitcher-gpu
     working_dir: /app
-
+    runtime: nvidia                     # 关键：指定运行时
     environment:
       FIJI_PATH: /opt/Fiji.app
       FIJI_EXE: /opt/Fiji.app/ImageJ-linux64
       NVIDIA_VISIBLE_DEVICES: all
-
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility   # 可选，但建议添加
     volumes:
+      - .:/app
       - ./data:/data
       - ./results:/results
       - ./fiji_config.json:/app/fiji_config.json
-
-    command: micromamba run -n fiji-stitcher python batch_run_all_to_one.py --gpu
-
+      - cellpose_cache:/root/.cellpose
+      - torch_cache:/root/.cache/torch
+    command: ["micromamba", "run", "-n", "fiji-stitcher", "python", "batch_run_all_to_one.py", "--gpu"]
+    # deploy 部分可以保留，但 runtime 已足够，也可以删除
     deploy:
       resources:
         reservations:
@@ -23,3 +28,7 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+
+volumes:
+  cellpose_cache:
+  torch_cache:

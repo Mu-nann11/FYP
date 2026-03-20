@@ -1,18 +1,29 @@
-# filter_cellpose_by_roi.py
-
 import pandas as pd
 from pathlib import Path
+from fiji_stitcher.config import load_config
 
-# 1) 读取 Cellpose 特征表（Compared_Result 里的 CSV）
-cp_path = Path(r"D:\FYP_TRY\20_12_FYP_1\Result\Compared_Result\A4_cell_features_with_labels.csv")
-df_cp = pd.read_csv(cp_path)
+# 1) 加载配置获取路径
+config = load_config()
+# 容器内路径
+batch_dir = Path(config.get("BATCH_OUTPUT_DIR", "/results/batch_features"))
+out_dir = Path(config.get("FEATURE_OUTPUT_DIR", "/results/compared_result"))
+
+# 如果在本地运行
+if not batch_dir.exists():
+    root = Path(r"D:\15_3_FYP_Munan\Code")
+    batch_dir = root / "results" / "batch_features"
+    out_dir = root / "results" / "compared_result"
+
+cp_path = batch_dir / "all_blocks_cell_features.csv"
+print(f"Reading features from: {cp_path}")
+df_all = pd.read_csv(cp_path)
+
+# 过滤出 A4 块的数据
+df_cp = df_all[df_all["block"] == "A4"].copy()
 
 # 质心列
 cx_col = "centroid_x"
 cy_col = "centroid_y"
-
-print("列名：")
-print(df_cp.columns.tolist())
 
 # 2) 根据 QuPath 中矩形的中心点 + 长度定义 ROI
 # 把下面两个数值改成你在 QuPath 信息栏看到的 Centroid X/µm 和 Centroid Y/µm
@@ -47,8 +58,7 @@ print("\n=== ROI 内面积统计 ===")
 print("area mean/median:",
       df_roi["area"].mean(), df_roi["area"].median())
 
-# 5) 保存 ROI 内细胞到新文件（固定目录 Compared_Result）
-out_dir = Path(r"D:\FYP_TRY\20_12_FYP_1\Result\Compared_Result")
+# 5) 保存 ROI 内细胞到新文件
 out_dir.mkdir(parents=True, exist_ok=True)
 
 out_path = out_dir / "A4_cell_features_roi_only.csv"

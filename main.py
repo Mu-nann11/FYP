@@ -40,7 +40,10 @@ def main():
     ).strip() or "1"
 
     if choice == "1":
-        level1_dirs = get_all_level1_directories(config)
+        if config.get("ONLY_LEVEL1"):
+            level1_dirs = [config["ONLY_LEVEL1"]]
+        else:
+            level1_dirs = get_all_level1_directories(config)
         if not level1_dirs:
             logger.error("No level1 directories found; exit.")
             print("❌ 无可用一级目录，程序退出")

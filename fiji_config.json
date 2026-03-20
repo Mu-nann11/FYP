@@ -32,9 +32,18 @@
 
   "FEATURE_OUTPUT_DIR": "/results/compared_result",
 
+  "SCORING": {
+    "POSITIVE_THRESHOLD": 5000,
+    "HER2_THRESHOLDS": {
+      "3+": 15000,
+      "2+": 8000,
+      "1+": 3000
+    }
+  },
+
   "SEGMENTATION": {
     "MODEL_TYPE": "nuclei",
-    "USE_GPU": false,
+    "USE_GPU": true,
     "DIAMETER": null,
     "FLOW_THRESHOLD": 0.4,
     "CELLPROB_THRESHOLD": 0.0,

@@ -3,19 +3,11 @@ import tifffile
 import cv2
 import numpy as np
 
-CHANNELS = ["DAPI", "HER2", "PR", "ER"]
+from utils import normalize_to_uint16
 
+CHANNELS = ["DAPI", "HER2", "PR", "ER"]
 # 容器内裁剪结果目录，对应宿主机 ./results/crop
 CROP_ROOT = Path("/results/crop")
-
-
-def normalize_to_uint16(img):
-    img = img.astype(np.float32)
-    img -= img.min()
-    if img.max() > 0:
-        img /= img.max()
-    img = (img * 65535.0).clip(0, 65535)
-    return img.astype(np.uint16)
 
 
 def preprocess_16bit(img):

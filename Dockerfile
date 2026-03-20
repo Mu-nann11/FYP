@@ -1,3 +1,4 @@
+# syntax = docker/dockerfile:1.3
 FROM mambaorg/micromamba:1.5.10
 
 USER root
@@ -15,25 +16,29 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
+# 复制环境文件（变化较少）
 COPY environment.yml /tmp/environment.yml
-RUN micromamba env create -f /tmp/environment.yml && \
-    micromamba run -n fiji-stitcher python -m pip uninstall -y torch torchvision torchaudio || true && \
-    micromamba run -n fiji-stitcher python -m pip install --no-cache-dir \
-      torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 \
-      --index-url https://download.pytorch.org/whl/cu126 && \
+
+# 使用缓存挂载创建环境（避免重复下载）
+RUN --mount=type=cache,target=/opt/conda/pkgs \
+    micromamba env create -f /tmp/environment.yml && \
     micromamba clean --all --yes
 
 ENV MAMBA_DOCKERFILE_ACTIVATE=1
 SHELL ["/usr/local/bin/_dockerfile_shell.sh"]
 
-RUN wget https://downloads.imagej.net/fiji/stable/fiji-stable-linux64-jdk.zip -O /tmp/fiji.zip && \
-    unzip /tmp/fiji.zip -d /opt && \
-    rm /tmp/fiji.zip
+ARG DOWNLOAD_FIJI=0
+RUN if [ "$DOWNLOAD_FIJI" = "1" ]; then \
+      wget https://downloads.imagej.net/fiji/stable/fiji-stable-linux64-jdk.zip -O /tmp/fiji.zip && \
+      unzip /tmp/fiji.zip -d /opt && \
+      rm /tmp/fiji.zip; \
+    fi
 
 ENV FIJI_PATH=/opt/Fiji.app
 ENV FIJI_EXE=/opt/Fiji.app/ImageJ-linux64
 ENV PYTHONPATH=/app
 
+# 复制代码（最后，变化最频繁）
 COPY . /app
 
 CMD ["micromamba", "run", "-n", "fiji-stitcher", "python", "main.py", "--batch"]

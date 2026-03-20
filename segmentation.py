@@ -2,9 +2,19 @@ import torch
 import numpy as np
 import tifffile
 from cellpose import models
+from skimage.segmentation import expand_labels
+from skimage.segmentation import watershed
+from skimage.filters import threshold_otsu
+from skimage.morphology import remove_small_objects
+from skimage.measure import label
+import cv2
 
-USE_GPU = torch.cuda.is_available()
+from utils import normalize_to_uint16
+from config import config
+
+USE_GPU = config.get("SEGMENTATION.USE_GPU", torch.cuda.is_available())
 _MODEL = None
+_STARDIST_MODEL = None
 
 
 def get_nuclei_model():
@@ -13,15 +23,6 @@ def get_nuclei_model():
         print("Init CellposeModel once. USE_GPU =", USE_GPU)
         _MODEL = models.CellposeModel(gpu=USE_GPU, model_type="nuclei")
     return _MODEL
-
-
-def normalize_to_uint16(img):
-    img = img.astype(np.float32)
-    img -= img.min()
-    if img.max() > 0:
-        img /= img.max()
-    img = (img * 65535.0).clip(0, 65535)
-    return img.astype(np.uint16)
 
 
 def segment_nuclei(dapi_img):
@@ -34,23 +35,114 @@ def segment_nuclei(dapi_img):
 
     masks, flows, styles = model.eval(
         img,
-        channels=[0, 0],
-        diameter=None,
-        flow_threshold=0.4,
-        cellprob_threshold=0.0,
+        channels=config.get("SEGMENTATION.CHANNELS", [0, 0]),
+        diameter=config.get("SEGMENTATION.DIAMETER", None),
+        flow_threshold=config.get("SEGMENTATION.FLOW_THRESHOLD", 0.4),
+        cellprob_threshold=config.get("SEGMENTATION.CELLPROB_THRESHOLD", 0.0),
     )
     return masks
 
 
-def save_nuclei_overlay(dapi, masks, out_tif_path):
+def get_stardist_model():
+    global _STARDIST_MODEL
+    if _STARDIST_MODEL is None:
+        from stardist.models import StarDist2D
+        _STARDIST_MODEL = StarDist2D.from_pretrained("2D_versatile_fluo")
+    return _STARDIST_MODEL
+
+
+def segment_nuclei_stardist(dapi_img):
+    from csbdeep.utils import normalize
+
+    img = dapi_img.astype(np.float32)
+    img = normalize(img, 1, 99.8, axis=None)
+
+    model = get_stardist_model()
+    labels, _ = model.predict_instances(img)
+    return labels.astype(np.int32)
+
+
+def segment_nuclei_watershed(
+    dapi_img,
+    min_area_px: int = 64,
+    blur_ksize: int = 3,
+):
+    img = dapi_img.astype(np.float32)
+    img -= float(img.min())
+    vmax = float(img.max())
+    if vmax > 0:
+        img /= vmax
+
+    if blur_ksize and blur_ksize > 1:
+        if blur_ksize % 2 == 0:
+            blur_ksize += 1
+        img_blur = cv2.GaussianBlur(img, (blur_ksize, blur_ksize), 0)
+    else:
+        img_blur = img
+
+    thr = float(threshold_otsu(img_blur))
+    fg = img_blur > thr
+    fg = remove_small_objects(fg, min_size=int(min_area_px))
+
+    if not np.any(fg):
+        return np.zeros(dapi_img.shape[:2], dtype=np.int32)
+
+    dist = cv2.distanceTransform(fg.astype(np.uint8), cv2.DIST_L2, 3)
+    peak = dist > (0.5 * float(dist.max()))
+    markers = label(peak)
+    if int(markers.max()) == 0:
+        markers = label(fg)
+
+    seg = watershed(-dist, markers=markers, mask=fg)
+    seg = seg.astype(np.int32)
+    return seg
+
+
+def segment_nuclei_by_method(dapi_img, method: str):
+    m = str(method).strip().lower()
+    if m in ("cellpose", "cp", "nuclei"):
+        return segment_nuclei(dapi_img)
+    if m in ("stardist", "sd"):
+        return segment_nuclei_stardist(dapi_img)
+    if m in ("watershed", "ws"):
+        return segment_nuclei_watershed(dapi_img)
+    raise ValueError("unknown segmentation method: %s" % method)
+
+
+def get_cytoplasm_masks(nuclei_masks, expansion_distance=None):
     """
-    保存 16-bit TIFF overlay，而不是 8-bit PNG。
+    基于核掩膜进行扩张，估算胞质区域。
+    expansion_distance: 扩张的像素距离。若为 None，则从配置读取。
+    返回: (cell_masks, cyto_only_masks)
+    - cell_masks: 包含核与质的整个细胞。
+    - cyto_only_masks: 仅包含胞质（去掉了核的部分）。
+    """
+    if expansion_distance is None:
+        expansion_distance = config.expansion_distance
+    
+    # 整个细胞的掩膜 (核 + 扩张出的质)
+    cell_masks = expand_labels(nuclei_masks, distance=expansion_distance)
+    
+    # 仅胞质部分的掩膜 (cell_masks 减去 nuclei_masks)
+    cyto_only_masks = cell_masks.copy()
+    cyto_only_masks[nuclei_masks > 0] = 0
+    
+    return cell_masks, cyto_only_masks
+
+
+def save_nuclei_overlay(dapi, masks, out_tif_path, cell_masks=None):
+    """
+    保存 16-bit TIFF overlay。
+    如果提供了 cell_masks，还会绘制细胞边缘。
     """
     h, w = masks.shape
     color_mask = np.zeros((h, w, 3), dtype=np.uint16)
 
     rng = np.random.default_rng(42)
-    for lab in range(1, int(masks.max()) + 1):
+    max_lab = int(masks.max())
+    
+    # 绘制填色的核
+    for lab in range(1, max_lab + 1):
         color = rng.integers(0, 65536, size=3, dtype=np.uint16)
         color_mask[masks == lab] = color
 
@@ -59,11 +151,23 @@ def save_nuclei_overlay(dapi, masks, out_tif_path):
     else:
         dapi16 = dapi
 
-    dapi_rgb = np.stack([dapi16, dapi16, dapi16], axis=-1)
+    dapi_rgb = np.stack([dapi16, dapi16, dapi16], axis=-1).astype(np.float32)
+    overlay = 0.6 * dapi_rgb + 0.4 * color_mask.astype(np.float32)
 
-    overlay = (
-        0.5 * dapi_rgb.astype(np.float32) +
-        0.5 * color_mask.astype(np.float32)
-    ).clip(0, 65535).astype(np.uint16)
+    if cell_masks is not None:
+        nuc = masks > 0
+        cyto = (cell_masks > 0) & (~nuc)
 
+        overlay[nuc] = 0.5 * overlay[nuc] + 0.5 * np.array([65535, 0, 0], dtype=np.float32)
+        overlay[cyto] = 0.5 * overlay[cyto] + 0.5 * np.array([0, 65535, 0], dtype=np.float32)
+
+        edges = np.zeros((h, w), dtype=np.uint8)
+        for lab in range(1, int(cell_masks.max()) + 1):
+            m = (cell_masks == lab).astype(np.uint8)
+            contours, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(edges, contours, -1, 255, 1)
+        
+        overlay[edges > 0] = [65535, 65535, 65535]
+
+    overlay = overlay.clip(0, 65535).astype(np.uint16)
     tifffile.imwrite(str(out_tif_path), overlay)
