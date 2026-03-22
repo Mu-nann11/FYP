@@ -6,7 +6,7 @@ from typing import Optional, List
 import pandas as pd
 
 from loader import load_block, DATASETS
-from alignment import align_by_shift
+from alignment import align
 from segmentation import segment_nuclei_by_method, get_cytoplasm_masks, save_nuclei_overlay, save_ki67_overlay
 from features import extract_features, score_markers, compute_ki67_index, compute_ki67_hotspot_index
 from utils import get_logger
@@ -21,6 +21,7 @@ class BlockProcessor:
         dataset: str = "TMAe",
         seg_method: str = "cellpose",
         do_align: bool = True,
+        align_method: str = "auto",
         save_overlay: bool = True,
         overlay_dir: Optional[Path] = None,
         expansion_distance: int = 15
@@ -28,6 +29,7 @@ class BlockProcessor:
         self.dataset = dataset
         self.seg_method = seg_method
         self.do_align = do_align
+        self.align_method = align_method
         self.save_overlay = save_overlay
         self.overlay_dir = overlay_dir or (config.batch_output_dir / "overlays")
         self.expansion_distance = expansion_distance
@@ -50,8 +52,11 @@ class BlockProcessor:
 
         if self.do_align:
             for ch in list(channels_dict.keys()):
-                aligned, _, _ = align_by_shift(dapi, channels_dict[ch])
+                aligned, _, info = align(dapi, channels_dict[ch], method=self.align_method)
                 channels_dict[ch] = aligned
+                logger.info(f"  Alignment [{ch}]: method={info.get('method')}, "
+                            f"MI={info.get('mutual_information', 'N/A'):.3f}, "
+                            f"NCC={info.get('ncc', 'N/A'):.3f}")
 
         # TMAd: 加入 cycle2 的 KI67 通道
         ki67_img = None
@@ -61,7 +66,10 @@ class BlockProcessor:
             if "KI67" in cycle2:
                 ki67_img = cycle2["KI67"]
                 if self.do_align and "DAPI" in cycle2:
-                    ki67_img, _, _ = align_by_shift(dapi, ki67_img)
+                    ki67_img, _, info = align(dapi, ki67_img, method=self.align_method)
+                    logger.info(f"  Alignment [KI67]: method={info.get('method')}, "
+                                f"MI={info.get('mutual_information', 'N/A'):.3f}, "
+                                f"NCC={info.get('ncc', 'N/A'):.3f}")
                 channels_dict["KI67"] = ki67_img
 
         # 3. 分割 (始终用 cycle1 DAPI)
@@ -111,6 +119,8 @@ def run_batch():
     parser.add_argument("--out-tag", default="")
     parser.add_argument("--no-overlay", action="store_true")
     parser.add_argument("--no-align", action="store_true")
+    parser.add_argument("--align-method", default="auto", choices=["auto", "orb", "ecc", "shift"],
+                        help="Alignment method: auto (ORB→ECC→phase corr), orb, ecc, shift")
     parser.add_argument("--resume", action="store_true", help="Skip already processed blocks")
     args = parser.parse_args()
 
@@ -141,6 +151,7 @@ def run_batch():
         dataset=dataset,
         seg_method=seg_method,
         do_align=not args.no_align,
+        align_method=args.align_method,
         save_overlay=not args.no_overlay,
         overlay_dir=overlay_dir,
         expansion_distance=config.expansion_distance
