@@ -2,9 +2,109 @@ import numpy as np
 import pandas as pd
 from skimage.measure import regionprops
 from skimage.filters import threshold_otsu
+from scipy.spatial import cKDTree
 import cv2
 from utils import q90
 from config import config
+
+
+def compute_spatial_context(
+    df: pd.DataFrame,
+    k_neighbors: tuple = None,
+    density_radii: tuple = None,
+) -> pd.DataFrame:
+    """
+    细胞空间上下文特征：
+    1. K-th 最近邻距离 (nn_dist_1, nn_dist_2, ...)
+    2. 局部密度 (local_density_50px, local_density_100px, ...)
+    3. 与最近阳性邻居的距离 (nn_pos_dist)
+    4. 阳性邻居比例 (pos_neighbor_frac_100px)
+
+    需要 df 中有 centroid_x, centroid_y。
+    可选：KI67_status 列用于阳性邻居分析。
+    参数默认从 fiji_config.json SPATIAL 段读取。
+    """
+    if k_neighbors is None:
+        k_neighbors = tuple(config.get("SPATIAL.K_NEIGHBORS", [1, 2, 3]))
+    if density_radii is None:
+        density_radii = tuple(config.get("SPATIAL.DENSITY_RADII_PX", [50, 100, 200]))
+    pos_radius = float(config.get("SPATIAL.POS_NEIGHBOR_RADIUS_PX", 100))
+    xy = df[["centroid_x", "centroid_y"]].to_numpy(dtype=np.float64)
+    valid = np.isfinite(xy).all(axis=1)
+    n = len(df)
+
+    # 初始化输出列
+    for k in k_neighbors:
+        df[f"nn_dist_{k}"] = np.nan
+    for r in density_radii:
+        df[f"local_density_{int(r)}px"] = 0
+        df[f"pos_neighbor_frac_{int(r)}px"] = np.nan
+    df["nn_pos_dist"] = np.nan
+
+    if valid.sum() < 2:
+        return df
+
+    # 构建 KDTree（仅用有效坐标）
+    valid_idx = np.where(valid)[0]
+    tree = cKDTree(xy[valid_idx])
+
+    max_k = max(k_neighbors)
+    max_r = max(density_radii)
+
+    # 批量查询
+    # k+1 因为 query 自身距离为 0
+    all_dists, all_idxs = tree.query(xy[valid_idx], k=max_k + 1, distance_upper_bound=max_r + 1)
+    # all_dists shape: (n_valid, max_k+1), 第 0 列是自身(距离≈0)
+
+    # --- KNN 距离 ---
+    for k in k_neighbors:
+        # k-th 邻居在 all_dists 中的列索引 = k（跳过自身列 0）
+        col_idx = k  # 1-based k → 列 k
+        if col_idx < all_dists.shape[1]:
+            d_vals = all_dists[:, col_idx]
+            d_vals[~np.isfinite(d_vals)] = np.nan
+            for i, vi in enumerate(valid_idx):
+                df.loc[vi, f"nn_dist_{k}"] = d_vals[i]
+
+    # --- 局部密度 ---
+    # 重新查询密度半径（query_ball_point 返回 neighbors list）
+    for r in density_radii:
+        neighbors_list = tree.query_ball_point(xy[valid_idx], r=r)
+        col_name = f"local_density_{int(r)}px"
+        for i, vi in enumerate(valid_idx):
+            # 减去自身
+            df.loc[vi, col_name] = max(0, len(neighbors_list[i]) - 1)
+
+    # --- 阳性邻居相关 ---
+    has_ki67 = "KI67_status" in df.columns
+    if has_ki67:
+        ki67_pos_mask = (df["KI67_status"] == "Positive").values
+
+        # 最近阳性邻居距离 + 阳性邻居比例 (用 pos_radius 半径)
+        ref_radius = min(pos_radius, max_r)
+        pos_neighbors_list = tree.query_ball_point(xy[valid_idx], r=ref_radius)
+        # 对每个 cell 找最近的阳性邻居
+        for i, vi in enumerate(valid_idx):
+            nbrs_valid = pos_neighbors_list[i]
+            # nbrs_valid 是 valid_idx 内的索引，转回原始 df 索引
+            nbrs_orig = valid_idx[np.array(nbrs_valid, dtype=int)]
+            # 排除自身
+            nbrs_orig = nbrs_orig[nbrs_orig != vi]
+
+            if len(nbrs_orig) > 0:
+                pos_nbrs = nbrs_orig[ki67_pos_mask[nbrs_orig]]
+                if len(pos_nbrs) > 0:
+                    dists_to_pos = np.linalg.norm(
+                        xy[vi] - xy[pos_nbrs], axis=1
+                    )
+                    df.loc[vi, "nn_pos_dist"] = float(dists_to_pos.min())
+                df.loc[vi, f"pos_neighbor_frac_{int(ref_radius)}px"] = round(
+                    float(ki67_pos_mask[nbrs_orig].mean()), 4
+                )
+            else:
+                df.loc[vi, f"pos_neighbor_frac_{int(ref_radius)}px"] = 0.0
+
+    return df
 
 
 def _safe_otsu_threshold(vals: np.ndarray, fallback: float) -> float:
@@ -160,6 +260,9 @@ def extract_features(block_name, nuclei_masks, cyto_only_masks, channels_dict, c
                     mem_p90s[lab] = float("nan")
             df["HER2_membrane_mean"] = df["cell_id"].map(mem_means)
             df["HER2_membrane_p90"] = df["cell_id"].map(mem_p90s)
+
+    # 6. 细胞空间上下文特征（最近邻距离、局部密度）
+    df = compute_spatial_context(df)
 
     return df
 

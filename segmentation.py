@@ -313,3 +313,165 @@ def save_ki67_hotspot_overlay(
     tifffile.imwrite(str(out_tif_path), overlay_u8)
     png_path = str(out_tif_path).replace(".tif", ".png").replace(".tiff", ".png")
     cv2.imwrite(png_path, overlay_u8)
+
+
+# =====================================================================
+# SAM Mask Refinement
+# =====================================================================
+
+_SAM_MODEL = None
+
+
+def _get_sam_model():
+    """懒加载 SAM ViT-B 模型。需环境中有 segment-anything 包 + checkpoint。"""
+    global _SAM_MODEL
+    if _SAM_MODEL is not None:
+        return _SAM_MODEL
+
+    try:
+        from segment_anything import sam_model_registry, SamPredictor
+    except ImportError:
+        raise ImportError(
+            "segment-anything 未安装。请在 environment.yml 或 Dockerfile 中添加：\n"
+            "  pip install git+https://github.com/facebookresearch/segment-anything.git"
+        )
+
+    sam_checkpoint = config.get("SEGMENTATION.SAM_CHECKPOINT", "/models/sam_vit_b_01ec64.pth")
+    sam_model_type = config.get("SEGMENTATION.SAM_MODEL_TYPE", "vit_b")
+    use_gpu = config.get("SEGMENTATION.USE_GPU", torch.cuda.is_available())
+
+    import os
+    if not os.path.isfile(sam_checkpoint):
+        raise FileNotFoundError(
+            f"SAM checkpoint 不存在: {sam_checkpoint}\n"
+            f"请下载 ViT-B 权重并设置 SEGMENTATION.SAM_CHECKPOINT"
+        )
+
+    sam = sam_model_registry[sam_model_type](checkpoint=sam_checkpoint)
+    sam.to(device="cuda" if use_gpu else "cpu")
+    _SAM_MODEL = SamPredictor(sam)
+    print(f"SAM model loaded: {sam_model_type}, device={'cuda' if use_gpu else 'cpu'}")
+    return _SAM_MODEL
+
+
+def _dapi_to_rgb_uint8(dapi: np.ndarray) -> np.ndarray:
+    """将单通道 DAPI 转为 3 通道 uint8 供 SAM 使用。"""
+    if dapi.dtype == np.uint16:
+        img = (dapi.astype(np.float32) / 65535.0 * 255.0).clip(0, 255).astype(np.uint8)
+    elif dapi.dtype == np.float64 or dapi.dtype == np.float32:
+        vmin, vmax = float(dapi.min()), float(dapi.max())
+        if vmax > vmin:
+            img = ((dapi - vmin) / (vmax - vmin) * 255.0).clip(0, 255).astype(np.uint8)
+        else:
+            img = np.zeros_like(dapi, dtype=np.uint8)
+    else:
+        img = dapi.astype(np.uint8)
+    return np.stack([img, img, img], axis=-1)
+
+
+def refine_masks_with_sam(
+    dapi: np.ndarray,
+    initial_masks: np.ndarray,
+    min_area: int = 50,
+    box_pad: int = 3,
+    max_masks: int = 0,
+) -> np.ndarray:
+    """
+    用 SAM 对 cellpose/StarDist/watershed 的初始 mask 进行边界精炼。
+
+    流程：
+    1. 对每个初始 mask 提取 bounding box
+    2. 用 bbox 作为 SAM prompt，获取精炼 mask
+    3. SAM mask 与原始 label 合并，重叠区域取最高 IoU 对应的 label
+    4. 未被 SAM 覆盖的区域保留原始 mask
+
+    参数：
+        dapi: DAPI 图像
+        initial_masks: 初始分割 label mask
+        min_area: 忽略面积小于此的初始 mask
+        box_pad: bbox 扩展像素（避免边界裁切）
+        max_masks: 最大处理数量，0=不限
+
+    返回：
+        refined_masks: 精炼后的 label mask（int32）
+    """
+    predictor = _get_sam_model()
+
+    h, w = initial_masks.shape
+    rgb = _dapi_to_rgb_uint8(dapi)
+    predictor.set_image(rgb)
+
+    from skimage.measure import regionprops
+
+    props = regionprops(initial_masks)
+    n_total = len(props)
+    if n_total == 0:
+        return initial_masks.copy()
+
+    # 过滤小区域 + 排序（大区域优先）
+    props = [p for p in props if p.area >= min_area]
+    props.sort(key=lambda p: p.area, reverse=True)
+
+    if max_masks > 0:
+        props = props[:max_masks]
+
+    print(f"SAM refinement: {len(props)}/{n_total} masks to refine (min_area={min_area})")
+
+    # 精炼结果：confidence map + label map
+    refined = np.zeros((h, w), dtype=np.int32)
+    confidence = np.zeros((h, w), dtype=np.float32)
+
+    for p in props:
+        label_id = p.label
+        minr, minc, maxr, maxc = p.bbox
+
+        # 扩展 bbox
+        box = np.array([
+            max(0, minc - box_pad),
+            max(0, minr - box_pad),
+            min(w - 1, maxc + box_pad),
+            min(h - 1, maxr + box_pad),
+        ])
+
+        masks_sam, scores_sam, _ = predictor.predict(
+            box=box,
+            multimask_output=True,
+        )
+
+        if len(masks_sam) == 0:
+            # SAM 没有输出，保留原始
+            region = initial_masks == label_id
+            refined[region] = label_id
+            confidence[region] = 1.0
+            continue
+
+        # 取最高分 mask
+        best_idx = np.argmax(scores_sam)
+        sam_mask = masks_sam[best_idx]
+        sam_score = float(scores_sam[best_idx])
+
+        # 只在原始 mask 区域内更新（SAM 可能扩出额外区域）
+        orig_region = initial_masks == label_id
+        update_region = sam_mask & orig_region
+
+        if update_region.sum() > 0:
+            # 高置信区域用 SAM 结果
+            higher_conf = sam_score > confidence[update_region]
+            if higher_conf.any():
+                refined[update_region & (sam_score > confidence)] = label_id
+                confidence[update_region & (sam_score > confidence)] = sam_score
+
+        # 原始区域中未被 SAM 覆盖的部分保留
+        fallback = orig_region & (refined == 0)
+        refined[fallback] = label_id
+        confidence[fallback] = 1.0
+
+    # 确保 label 连续
+    unique_labels = np.unique(refined)
+    unique_labels = unique_labels[unique_labels != 0]
+    remap = {old: new for new, old in enumerate(unique_labels, 1)}
+    remap[0] = 0
+    refined = np.vectorize(remap.get)(refined).astype(np.int32)
+
+    print(f"SAM refinement done: {len(unique_labels)} labels in output")
+    return refined

@@ -22,8 +22,8 @@
 | P1 | Ki67 hotspot 完善 + 可视化 | ✅ 完成 |
 | P1 | ER/PR 汇总到 patient 级 + Cohen's kappa | 🔲 待做 |
 | P1 | 可视化报告生成器 (HTML/PDF) | 🔲 待做 |
-| P2 | 细胞空间上下文特征（最近邻距离、局部密度） | 🔲 待做 |
-| P2 | SAM mask refinement | 🔲 待做 |
+| P2 | 细胞空间上下文特征（最近邻距离、局部密度） | ✅ 完成 |
+| P2 | SAM mask refinement | ✅ 完成 |
 | P3 | Cellpose fine-tuning | 🔲 待做（可降为 future work） |
 | P3 | Texture features (GLCM/LBP) | 🔲 待做 |
 
@@ -87,13 +87,61 @@
    - Ki67 block 自动额外生成 `{dataset}_{block}_ki67_hotspot_overlay.tif/.png`
    - 与原有 `_ki67_overlay.tif` 并行输出
 
+### ✅ P2-1: 细胞空间上下文特征 (2026-03-22)
+
+**改动文件**: `features.py`, `fiji_config.json`
+
+**新增功能**:
+1. **`compute_spatial_context(df)`**:
+   - **KNN 最近邻距离**: `nn_dist_1`, `nn_dist_2`, `nn_dist_3`（第 K 近邻像素距离）
+   - **局部密度**: `local_density_50px`, `local_density_100px`, `local_density_200px`（指定半径内细胞数量）
+   - **阳性邻居分析** (KI67): `nn_pos_dist`（最近阳性邻居距离）, `pos_neighbor_frac_100px`（阳性邻居比例）
+
+2. **性能优化**:
+   - 使用 `scipy.spatial.cKDTree` 批量查询，O(n log n) 复杂度
+   - 单次 query 覆盖所有 K 值和密度半径
+
+3. **配置** (fiji_config.json `SPATIAL` 段):
+   - `K_NEIGHBORS`: [1, 2, 3]
+   - `DENSITY_RADII_PX`: [50, 100, 200]
+   - `POS_NEIGHBOR_RADIUS_PX`: 100
+
+### ✅ P2-2: SAM Mask Refinement (2026-03-22)
+
+**改动文件**: `segmentation.py`, `batch_run_all_to_one.py`, `fiji_config.json`
+
+**新增功能**:
+1. **`refine_masks_with_sam(dapi, initial_masks)`**:
+   - 对 cellpose/StarDist/watershed 初始 mask 的边界进行精炼
+   - 以初始 mask 的 bounding box 作为 SAM prompt
+   - SAM 输出与原始 label 合并，置信度竞争机制
+   - 未被 SAM 覆盖区域自动保留原始结果
+   - 自动 label 重编号保持连续
+
+2. **辅助函数**:
+   - `_get_sam_model()`: 懒加载 SAM ViT-B 模型 + checkpoint
+   - `_dapi_to_rgb_uint8()`: DAPI 单通道 → RGB uint8（SAM 输入要求）
+
+3. **安全降级**:
+   - SAM 包未安装 → 报 warning 跳过，不影响原流程
+   - checkpoint 不存在 → 报 warning 跳过
+   - 可通过 `--sam-refine` CLI 或 `SEGMENTATION.SAM_REFINE: true` 配置启用
+
+4. **配置** (fiji_config.json `SEGMENTATION` 段):
+   - `SAM_REFINE`: false（默认关闭）
+   - `SAM_CHECKPOINT`: checkpoint 路径
+   - `SAM_MODEL_TYPE`: vit_b
+   - `SAM_MIN_AREA`: 50（忽略小于此面积的 mask）
+   - `SAM_BOX_PAD`: 3（bbox 扩展像素）
+
 ---
 
 ## 下一步
 
 **即将执行**: P1 — ER/PR 汇总到 patient 级 + Cohen's kappa
-- 现有代码已有 `_greedy_intensity_seeds` 和 `_hotspot_mask_from_seeds` 基础
-- 需要：完善 hotspot 阳性率计算 + 在 overlay 图上标注 hotspot 区域
+- 从 block 级别聚合到 patient 级别
+- 计算评分者间一致性 (Cohen's kappa, 如果有 QuPath 参考数据)
+- 可视化报告生成器
 
 ---
 

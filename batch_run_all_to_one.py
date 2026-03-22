@@ -7,7 +7,7 @@ import pandas as pd
 
 from loader import load_block, DATASETS
 from alignment import align
-from segmentation import segment_nuclei_by_method, get_cytoplasm_masks, save_nuclei_overlay, save_ki67_overlay, save_ki67_hotspot_overlay
+from segmentation import segment_nuclei_by_method, get_cytoplasm_masks, save_nuclei_overlay, save_ki67_overlay, save_ki67_hotspot_overlay, refine_masks_with_sam
 from features import extract_features, score_markers, compute_ki67_index, compute_ki67_hotspot_index, get_ki67_hotspot_seeds, compute_per_hotspot_ki67_index
 from utils import get_logger
 from config import config
@@ -24,7 +24,8 @@ class BlockProcessor:
         align_method: str = "auto",
         save_overlay: bool = True,
         overlay_dir: Optional[Path] = None,
-        expansion_distance: int = 15
+        expansion_distance: int = 15,
+        sam_refine: bool = False,
     ):
         self.dataset = dataset
         self.seg_method = seg_method
@@ -33,6 +34,7 @@ class BlockProcessor:
         self.save_overlay = save_overlay
         self.overlay_dir = overlay_dir or (config.batch_output_dir / "overlays")
         self.expansion_distance = expansion_distance
+        self.sam_refine = sam_refine
 
         if self.save_overlay:
             self.overlay_dir.mkdir(parents=True, exist_ok=True)
@@ -74,6 +76,18 @@ class BlockProcessor:
 
         # 3. 分割 (始终用 cycle1 DAPI)
         masks = segment_nuclei_by_method(dapi, method=self.seg_method)
+
+        # 3b. SAM 精炼 (可选)
+        if self.sam_refine:
+            sam_min_area = int(config.get("SEGMENTATION.SAM_MIN_AREA", 50))
+            sam_box_pad = int(config.get("SEGMENTATION.SAM_BOX_PAD", 3))
+            logger.info(f"  SAM refinement: min_area={sam_min_area}, box_pad={sam_box_pad}")
+            try:
+                masks = refine_masks_with_sam(dapi, masks, min_area=sam_min_area, box_pad=sam_box_pad)
+                logger.info(f"  SAM refinement done: {int(masks.max())} labels")
+            except (ImportError, FileNotFoundError) as e:
+                logger.warning(f"  SAM refinement skipped: {e}")
+                print(f"⚠️ SAM refinement skipped: {e}")
 
         # 4. 获取胞质掩膜
         cell_masks, cyto_only_masks = get_cytoplasm_masks(masks, expansion_distance=self.expansion_distance)
@@ -136,6 +150,7 @@ def run_batch():
     parser.add_argument("--align-method", default="auto", choices=["auto", "orb", "ecc", "shift"],
                         help="Alignment method: auto (ORB→ECC→phase corr), orb, ecc, shift")
     parser.add_argument("--resume", action="store_true", help="Skip already processed blocks")
+    parser.add_argument("--sam-refine", action="store_true", help="Use SAM to refine segmentation masks")
     args = parser.parse_args()
 
     dataset = args.dataset
@@ -168,7 +183,8 @@ def run_batch():
         align_method=args.align_method,
         save_overlay=not args.no_overlay,
         overlay_dir=overlay_dir,
-        expansion_distance=config.expansion_distance
+        expansion_distance=config.expansion_distance,
+        sam_refine=args.sam_refine or bool(config.get("SEGMENTATION.SAM_REFINE", False)),
     )
 
     all_dfs = []
