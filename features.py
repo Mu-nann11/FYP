@@ -238,6 +238,7 @@ def score_markers(df):
             df["HER2_score_basis"] = "cyto_mean"
 
     # ---------- Ki67：hotspot 内 Otsu 阈值；否则全视野 Otsu / 固定阈值 ----------
+    ki67_hotspot_seeds = []  # 保存种子坐标供可视化
     if "KI67_nuc_mean" in df.columns:
         fixed_thr = config.get("SCORING.KI67_THRESHOLD", None)
         if fixed_thr is not None:
@@ -253,6 +254,7 @@ def score_markers(df):
             df["KI67_threshold_mode_used"] = "global_otsu"
         else:
             seeds = _greedy_intensity_seeds(df, "KI67_nuc_mean", ki67_n_seeds, ki67_min_sep)
+            ki67_hotspot_seeds = seeds  # 保存供后续写入
             hmask = _hotspot_mask_from_seeds(df, seeds, ki67_radius)
             df["KI67_in_hotspot"] = hmask
             hot_vals = df.loc[hmask, "KI67_nuc_mean"].dropna().values
@@ -265,6 +267,13 @@ def score_markers(df):
                 df["KI67_threshold_mode_used"] = "global_otsu_fallback"
                 df["KI67_in_hotspot"] = True
             df["KI67_threshold_used"] = thr
+
+            # 将 hotspot 种子坐标写入 df（每行重复，方便后续读取）
+            for i, (sx, sy) in enumerate(seeds):
+                df[f"hotspot_seed_x_{i}"] = sx
+                df[f"hotspot_seed_y_{i}"] = sy
+            df["KI67_hotspot_radius_px"] = ki67_radius
+            df["KI67_hotspot_n_seeds"] = len(seeds)
 
         df["KI67_status"] = np.where(df["KI67_nuc_mean"] > thr, "Positive", "Negative")
 
@@ -296,3 +305,50 @@ def compute_ki67_hotspot_index(df: pd.DataFrame) -> float:
     sub = df.loc[m]
     n_pos = (sub["KI67_status"] == "Positive").sum()
     return round(100.0 * n_pos / len(sub), 2)
+
+
+def get_ki67_hotspot_seeds(df: pd.DataFrame) -> list[tuple[float, float]]:
+    """
+    从 dataframe 的 hotspot 坐标列中提取种子列表。
+    列名为 hotspot_seed_x_0, hotspot_seed_y_0, hotspot_seed_x_1, ...
+    """
+    seed_cols_x = sorted([c for c in df.columns if c.startswith("hotspot_seed_x_")])
+    seed_cols_y = sorted([c for c in df.columns if c.startswith("hotspot_seed_y_")])
+    seeds = []
+    for cx, cy in zip(seed_cols_x, seed_cols_y):
+        sx = df[cx].dropna()
+        sy = df[cy].dropna()
+        if not sx.empty and not sy.empty:
+            seeds.append((float(sx.iloc[0]), float(sy.iloc[0])))
+    return seeds
+
+
+def compute_per_hotspot_ki67_index(
+    df: pd.DataFrame,
+    seeds: list[tuple[float, float]],
+    radius_px: float,
+) -> list[dict]:
+    """
+    逐个 hotspot 计算 Ki67 阳性率。
+    返回 list of dict: {seed_x, seed_y, n_cells, n_positive, ki67_index}
+    """
+    if "KI67_status" not in df.columns or not seeds or radius_px <= 0:
+        return []
+
+    xy = df[["centroid_x", "centroid_y"]].to_numpy(dtype=np.float64)
+    status = df["KI67_status"].values
+
+    results = []
+    for i, (sx, sy) in enumerate(seeds):
+        d = np.linalg.norm(xy - np.array([sx, sy], dtype=np.float64), axis=1)
+        in_circle = d <= radius_px
+        n_cells = int(in_circle.sum())
+        if n_cells == 0:
+            results.append({"hotspot_id": i, "seed_x": sx, "seed_y": sy,
+                            "n_cells": 0, "n_positive": 0, "ki67_index": float("nan")})
+            continue
+        n_pos = int((status[in_circle] == "Positive").sum())
+        idx = round(100.0 * n_pos / n_cells, 2)
+        results.append({"hotspot_id": i, "seed_x": sx, "seed_y": sy,
+                        "n_cells": n_cells, "n_positive": n_pos, "ki67_index": idx})
+    return results

@@ -19,7 +19,7 @@
 |--------|------|------|
 | P0 | ORB + RANSAC 替代 phaseCorrelate（+ ECC 中间方案） | ✅ 完成 |
 | P0 | 配准质量指标 (MI / NCC) | ✅ 完成（随 P0 一并实现） |
-| P1 | Ki67 hotspot 完善 + 可视化 | 🔲 待做 |
+| P1 | Ki67 hotspot 完善 + 可视化 | ✅ 完成 |
 | P1 | ER/PR 汇总到 patient 级 + Cohen's kappa | 🔲 待做 |
 | P1 | 可视化报告生成器 (HTML/PDF) | 🔲 待做 |
 | P2 | 细胞空间上下文特征（最近邻距离、局部密度） | 🔲 待做 |
@@ -61,11 +61,37 @@
    - 每次对齐自动 log 方法名 + MI + NCC
    - BlockProcessor 新增 `align_method` 属性
 
+### ✅ P1-1: Ki67 hotspot 完善 + 可视化 (2026-03-22)
+
+**改动文件**: `features.py`, `segmentation.py`, `batch_run_all_to_one.py`
+
+**新增功能**:
+1. **Hotspot 坐标记录** (`features.py` → `score_markers`):
+   - hotspot 种子坐标写入 df（`hotspot_seed_x_0`, `hotspot_seed_y_0`, ...）
+   - 附带 `KI67_hotspot_radius_px` 和 `KI67_hotspot_n_seeds` 列
+
+2. **Per-hotspot Ki67 指数** (`features.py`):
+   - `get_ki67_hotspot_seeds(df)`: 从 df 提取种子坐标
+   - `compute_per_hotspot_ki67_index(df, seeds, radius_px)`: 逐个 hotspot 计算阳性率，返回 list of dict
+
+3. **Hotspot overlay 可视化** (`segmentation.py` → `save_ki67_hotspot_overlay`):
+   - 绿色 = hotspot 内阳性细胞（高亮重点）
+   - 红色 = hotspot 内阴性细胞
+   - 黄色 = hotspot 外阳性细胞（弱化显示）
+   - 灰色 = hotspot 外阴性细胞
+   - 青色圆环标注 hotspot 边界
+   - 左上角叠加全局 + per-hotspot Ki67 阳性率文字
+   - 同时输出 TIFF + PNG 格式
+
+4. **Batch 集成** (`batch_run_all_to_one.py`):
+   - Ki67 block 自动额外生成 `{dataset}_{block}_ki67_hotspot_overlay.tif/.png`
+   - 与原有 `_ki67_overlay.tif` 并行输出
+
 ---
 
 ## 下一步
 
-**即将执行**: P1 — Ki67 hotspot 完善 + 可视化
+**即将执行**: P1 — ER/PR 汇总到 patient 级 + Cohen's kappa
 - 现有代码已有 `_greedy_intensity_seeds` 和 `_hotspot_mask_from_seeds` 基础
 - 需要：完善 hotspot 阳性率计算 + 在 overlay 图上标注 hotspot 区域
 

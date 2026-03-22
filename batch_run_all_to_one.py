@@ -7,8 +7,8 @@ import pandas as pd
 
 from loader import load_block, DATASETS
 from alignment import align
-from segmentation import segment_nuclei_by_method, get_cytoplasm_masks, save_nuclei_overlay, save_ki67_overlay
-from features import extract_features, score_markers, compute_ki67_index, compute_ki67_hotspot_index
+from segmentation import segment_nuclei_by_method, get_cytoplasm_masks, save_nuclei_overlay, save_ki67_overlay, save_ki67_hotspot_overlay
+from features import extract_features, score_markers, compute_ki67_index, compute_ki67_hotspot_index, get_ki67_hotspot_seeds, compute_per_hotspot_ki67_index
 from utils import get_logger
 from config import config
 
@@ -97,6 +97,20 @@ class BlockProcessor:
         if ki67_img is not None and not df.empty:
             df["ki67_proliferation_index"] = compute_ki67_index(df)
             df["ki67_hotspot_proliferation_index"] = compute_ki67_hotspot_index(df)
+
+            # hotspot overlay 可视化
+            if self.save_overlay:
+                seeds = get_ki67_hotspot_seeds(df)
+                radius_px = float(config.get("SCORING.KI67_HOTSPOT_RADIUS_PX", 150.0))
+                per_hotspot = compute_per_hotspot_ki67_index(df, seeds, radius_px) if seeds else None
+                hotspot_tif = self.overlay_dir / f"{self.dataset}_{block_name}_ki67_hotspot_overlay.tif"
+                save_ki67_hotspot_overlay(
+                    dapi, masks, ki67_img, df,
+                    seeds=seeds, radius_px=radius_px,
+                    out_tif_path=hotspot_tif,
+                    per_hotspot_stats=per_hotspot,
+                )
+                logger.info(f"  Ki67 hotspot overlay saved: {hotspot_tif}")
 
         # global_cell_id 加入 dataset 前缀，避免 TMAe/TMAd 同名 block 冲突
         df["dataset"] = self.dataset

@@ -200,3 +200,116 @@ def save_ki67_overlay(dapi, masks, ki67_img, out_tif_path):
 
     overlay = overlay.clip(0, 65535).astype(np.uint16)
     tifffile.imwrite(str(out_tif_path), overlay)
+
+
+def save_ki67_hotspot_overlay(
+    dapi: np.ndarray,
+    masks: np.ndarray,
+    ki67_img: np.ndarray,
+    df,  # pd.DataFrame with KI67_status, KI67_in_hotspot, hotspot seeds
+    seeds: list,
+    radius_px: float,
+    out_tif_path,
+    per_hotspot_stats: list = None,
+):
+    """
+    Ki67 hotspot overlay 可视化：
+    - 灰底 DAPI
+    - 绿色 = hotspot 内阳性细胞
+    - 红色 = hotspot 内阴性细胞
+    - 黄色半透明 = hotspot 外阳性细胞
+    - 灰色 = hotspot 外阴性细胞
+    - 青色圆环 = hotspot 区域边界
+    - 左上角标注全局 + per-hotspot Ki67 指数
+    """
+    h, w = masks.shape
+
+    if dapi.dtype != np.uint16:
+        dapi16 = normalize_to_uint16(dapi)
+    else:
+        dapi16 = dapi
+
+    # 基础灰底
+    overlay = np.stack([dapi16, dapi16, dapi16], axis=-1).astype(np.float32)
+    # 归一化到 [0,1] 方便混合
+    overlay_01 = overlay / 65535.0
+
+    # 准备颜色（归一化到 [0,1]）
+    COLOR_POS_IN   = np.array([0.0, 1.0, 0.0])   # 绿：hotspot 内阳性
+    COLOR_NEG_IN   = np.array([1.0, 0.0, 0.0])   # 红：hotspot 内阴性
+    COLOR_POS_OUT  = np.array([1.0, 1.0, 0.0])   # 黄：hotspot 外阳性（弱显示）
+    COLOR_NEG_OUT  = np.array([0.35, 0.35, 0.35]) # 灰：hotspot 外阴性
+    ALPHA_IN  = 0.55
+    ALPHA_OUT = 0.25
+
+    # 构建 per-cell 查找
+    has_status = "KI67_status" in df.columns
+    has_hotspot = "KI67_in_hotspot" in df.columns
+
+    for lab in range(1, int(masks.max()) + 1):
+        region = masks == lab
+        if not region.any():
+            continue
+
+        # 查找该 cell 的状态
+        row = df[df["cell_id"] == lab]
+        if row.empty:
+            color = COLOR_NEG_OUT
+            alpha = ALPHA_OUT
+        else:
+            is_pos = has_status and row.iloc[0].get("KI67_status") == "Positive"
+            in_hs = has_hotspot and bool(row.iloc[0].get("KI67_in_hotspot", False))
+
+            if in_hs:
+                color = COLOR_POS_IN if is_pos else COLOR_NEG_IN
+                alpha = ALPHA_IN
+            else:
+                color = COLOR_POS_OUT if is_pos else COLOR_NEG_OUT
+                alpha = ALPHA_OUT
+
+        overlay_01[region] = (1 - alpha) * overlay_01[region] + alpha * color
+
+    # 画 hotspot 圆环
+    overlay_u8 = (overlay_01 * 255).clip(0, 255).astype(np.uint8)
+
+    for sx, sy in (seeds or []):
+        cv2.circle(overlay_u8, (int(round(sx)), int(round(sy))),
+                    int(round(radius_px)), (0, 255, 255), 2)  # 青色
+
+    # 标注文字
+    if has_status:
+        n_pos_total = int((df["KI67_status"] == "Positive").sum())
+        n_total = len(df)
+        global_idx = round(100.0 * n_pos_total / max(n_total, 1), 1)
+
+        if has_hotspot:
+            hs_mask = df["KI67_in_hotspot"].fillna(False)
+            hs_sub = df.loc[hs_mask]
+            if not hs_sub.empty:
+                hs_pos = int((hs_sub["KI67_status"] == "Positive").sum())
+                hs_idx = round(100.0 * hs_pos / len(hs_sub), 1)
+            else:
+                hs_idx = float("nan")
+        else:
+            hs_idx = global_idx
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        cv2.putText(overlay_u8, f"Global Ki67: {global_idx}%", (10, 30),
+                    font, 0.8, (255, 255, 0), 2, cv2.LINE_AA)
+        cv2.putText(overlay_u8, f"Hotspot Ki67: {hs_idx}%", (10, 60),
+                    font, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
+
+        # per-hotspot 标注
+        if per_hotspot_stats:
+            y_offset = 95
+            for stat in per_hotspot_stats:
+                label_text = (f"HS{stat['hotspot_id']}: {stat['ki67_index']}% "
+                              f"({stat['n_positive']}/{stat['n_cells']})")
+                cv2.putText(overlay_u8, label_text, (10, y_offset),
+                            font, 0.6, (0, 255, 255), 1, cv2.LINE_AA)
+                y_offset += 25
+
+    # 保存 TIFF + PNG
+    tifffile.imwrite(str(out_tif_path), overlay_u8)
+    png_path = str(out_tif_path).replace(".tif", ".png").replace(".tiff", ".png")
+    cv2.imwrite(png_path, overlay_u8)
