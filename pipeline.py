@@ -30,6 +30,23 @@ def _channel_order_from_config(config):
     return out if out else DEFAULT_CHANNEL_ORDER
 
 
+def _channel_order_for_stitch(config, cycle_name):
+    """
+    根据 cycle 名称返回对应的通道列表。
+    Cycle2 使用 LOADER.CYCLE2_CHANNELS，否则使用 LOADER.CHANNELS。
+    """
+    if cycle_name and "cycle2" in str(cycle_name).lower():
+        try:
+            ch = config.get("LOADER", {}).get("CYCLE2_CHANNELS", None)
+        except Exception:
+            ch = None
+        if ch:
+            out = [str(c).strip() for c in ch if str(c).strip()]
+            if out:
+                return out
+    return _channel_order_from_config(config)
+
+
 def run_stitch_for_channel(
     level1,
     channel,
@@ -176,8 +193,30 @@ def process_level1_sequential(level1_path, config, ij, logger):
     output_dir = stitched_parent / level1.name
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # 判断是否为 Cycle2：只有通道子目录存在时才拼接
+    cycle_name = level1.name
+    channels = _channel_order_for_stitch(config, cycle_name)
+
+    # Cycle2 + 仅 Composite（根目录多 tif、无通道子目录）→ 跳过
+    allow_cycle2_composite = bool(config.get("STITCH_ALLOW_CYCLE2_COMPOSITE", False))
+    if "cycle2" in str(cycle_name).lower() and not allow_cycle2_composite:
+        has_channel_dirs = any((level1 / ch).is_dir() for ch in channels)
+        if not has_channel_dirs:
+            # 检查根目录是否有 tif 文件（说明是未拆分的 Composite）
+            root_tifs = list(level1.glob("*.tif")) + list(level1.glob("*.tiff"))
+            if root_tifs:
+                logger.warning(
+                    "Cycle2 block %s has composite files but no channel subdirs; "
+                    "run spit_channel.py first. Skipping.",
+                    level1.name,
+                )
+                print(
+                    "⚠️ %s 根目录下有 Composite 文件但无 DAPI/KI67 子目录，"
+                    "请先运行 spit_channel.py 拆分通道，已跳过此块。" % level1.name
+                )
+                return
+
     results = {}
-    channels = _channel_order_from_config(config)
     ref_channel = str(config.get("STITCH_REFERENCE_CHANNEL", "")).strip()
     ref_registered = None
 

@@ -132,6 +132,8 @@ def load_config(config_path=None):
 
         "FEATURE_OUTPUT_DIR": "/results/compared_result",
 
+        "STITCH_ALLOW_CYCLE2_COMPOSITE": False,
+
         "SEGMENTATION": {
             "MODEL_TYPE": "nuclei",
             "USE_GPU": False,
@@ -143,6 +145,7 @@ def load_config(config_path=None):
 
         "LOADER": {
             "CHANNELS": ["DAPI", "HER2", "PR", "ER"],
+            "CYCLE2_CHANNELS": ["DAPI", "KI67"],
             "DO_PREPROCESS": False,
             "CLAHE_CLIP_LIMIT": 2.0,
             "CLAHE_TILE_GRID_SIZE": [8, 8],
