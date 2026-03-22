@@ -9,6 +9,8 @@ from loader import load_block, DATASETS
 from alignment import align
 from segmentation import segment_nuclei_by_method, get_cytoplasm_masks, save_nuclei_overlay, save_ki67_overlay, save_ki67_hotspot_overlay, refine_masks_with_sam
 from features import extract_features, score_markers, compute_ki67_index, compute_ki67_hotspot_index, get_ki67_hotspot_seeds, compute_per_hotspot_ki67_index
+from patient_aggregation import aggregate_to_patient, block_level_kappa, patient_level_kappa
+from report_generator import generate_report
 from utils import get_logger
 from config import config
 
@@ -151,6 +153,10 @@ def run_batch():
                         help="Alignment method: auto (ORB→ECC→phase corr), orb, ecc, shift")
     parser.add_argument("--resume", action="store_true", help="Skip already processed blocks")
     parser.add_argument("--sam-refine", action="store_true", help="Use SAM to refine segmentation masks")
+    parser.add_argument("--qupath-csv", default=None,
+                        help="Path to QuPath comparison CSV (from compare_qupath) for Cohen's kappa")
+    parser.add_argument("--no-report", action="store_true",
+                        help="Skip HTML report generation")
     args = parser.parse_args()
 
     dataset = args.dataset
@@ -162,6 +168,7 @@ def run_batch():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     out_csv = out_dir / f"all_blocks_cell_features{suffix}.csv"
+    patient_csv = out_dir / f"patient_level_scores{suffix}.csv"
     log_csv = out_dir / f"batch_log{suffix}.csv"
     overlay_dir = out_dir / f"overlays{suffix}"
     state_csv = out_dir / f"batch_state{suffix}.csv"
@@ -247,6 +254,82 @@ def run_batch():
     logger.info(f"Saved total CSV: {out_csv}")
     logger.info(f"Total cells: {len(df_all)}")
     logger.info(f"Overlays saved to: {overlay_dir}")
+
+    # =====================================================
+    # Patient-level ER/PR aggregation
+    # =====================================================
+    logger.info("Aggregating ER/PR scores to patient level...")
+    min_pos_frac = float(config.get("SCORING.ER_PR_MIN_POSITIVE_FRACTION", 0.01))
+    patient_df = aggregate_to_patient(df_all, min_pos_fraction=min_pos_frac)
+    patient_df.to_csv(patient_csv, index=False, encoding="utf-8-sig")
+    logger.info(f"Saved patient-level scores: {patient_csv}")
+    logger.info(f"Patients: {patient_df['patient_id'].nunique()}")
+    for _, row in patient_df.iterrows():
+        logger.info(f"  {row['patient_id']} / {row['marker']}: "
+                     f"{row['patient_status']} "
+                     f"(positive fraction={row['positive_fraction']:.4f}, "
+                     f"n={row['total_cells']}, blocks={row['n_blocks']})")
+
+    # =====================================================
+    # Cohen's kappa vs QuPath (if reference provided)
+    # =====================================================
+    if args.qupath_csv:
+        logger.info(f"Computing Cohen's kappa vs QuPath: {args.qupath_csv}")
+        try:
+            qupath_df = pd.read_csv(args.qupath_csv, encoding="utf-8-sig")
+
+            # Block-level (cell-matched) kappa
+            kappa_block = block_level_kappa(df_all, qupath_df)
+            if not kappa_block.empty:
+                kappa_block_path = out_dir / f"kappa_cell_level{suffix}.csv"
+                kappa_block.to_csv(kappa_block_path, index=False, encoding="utf-8-sig")
+                logger.info(f"Cell-level kappa saved: {kappa_block_path}")
+                for _, row in kappa_block.iterrows():
+                    logger.info(f"  {row['marker']}: kappa={row.get('kappa', 'N/A')}, "
+                                f"agreement={row.get('agreement_rate', 'N/A')}, "
+                                f"n={row.get('n_samples', 0)}")
+
+            # Patient-level kappa (if QuPath CSV also has block/patient info)
+            if "patient_id" in qupath_df.columns and "marker" in qupath_df.columns and "patient_status" in qupath_df.columns:
+                kappa_patient = patient_level_kappa(patient_df, qupath_df)
+                kappa_patient_path = out_dir / f"kappa_patient_level{suffix}.csv"
+                kappa_patient.to_csv(kappa_patient_path, index=False, encoding="utf-8-sig")
+                logger.info(f"Patient-level kappa saved: {kappa_patient_path}")
+                for _, row in kappa_patient.iterrows():
+                    logger.info(f"  {row['marker']}: kappa={row['kappa']}, "
+                                f"agreement={row['agreement_rate']}, "
+                                f"n_patients={row['n_patients']}")
+
+        except Exception as e:
+            logger.error(f"Kappa computation failed: {e}")
+            logger.error(traceback.format_exc())
+            print(f"⚠️ Kappa computation failed: {e}")
+
+    # =====================================================
+    # HTML Report
+    # =====================================================
+    kappa_csv_for_report = None
+    kappa_cell_path = out_dir / f"kappa_cell_level{suffix}.csv"
+    if kappa_cell_path.exists():
+        kappa_csv_for_report = kappa_cell_path
+
+    if not args.no_report:
+        try:
+            report_path = out_dir / f"report{suffix}.html"
+            generate_report(
+                cell_csv=out_csv,
+                patient_csv=patient_csv if patient_csv.exists() else None,
+                kappa_csv=kappa_csv_for_report,
+                overlay_dir=overlay_dir if overlay_dir.exists() else None,
+                out_html=report_path,
+                title=f"TMA {dataset} Analysis Report",
+            )
+            logger.info(f"HTML report: {report_path}")
+            print(f"📊 Report: {report_path}")
+        except Exception as e:
+            logger.error(f"Report generation failed: {e}")
+
+    logger.info("Batch run complete.")
 
 if __name__ == "__main__":
     run_batch()
