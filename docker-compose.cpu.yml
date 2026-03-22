@@ -17,8 +17,10 @@ services:
       - cellpose_cache:/root/.cellpose
       - torch_cache:/root/.cache/torch
       - keras_cache:/root/.keras
+      - cjdk_cache:/root/.cache/cjdk
 
 volumes:
   cellpose_cache:
   torch_cache:
   keras_cache:
+  cjdk_cache:

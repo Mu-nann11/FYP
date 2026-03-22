@@ -5,10 +5,10 @@ from typing import Optional, List
 
 import pandas as pd
 
-from loader import load_block
+from loader import load_block, DATASETS
 from alignment import align_by_shift
-from segmentation import segment_nuclei_by_method, get_cytoplasm_masks, save_nuclei_overlay
-from features import extract_features, score_markers
+from segmentation import segment_nuclei_by_method, get_cytoplasm_masks, save_nuclei_overlay, save_ki67_overlay
+from features import extract_features, score_markers, compute_ki67_index, compute_ki67_hotspot_index
 from utils import get_logger
 from config import config
 
@@ -18,67 +18,95 @@ logger = get_logger("batch_run", log_file=config.batch_output_dir / "batch_run.l
 class BlockProcessor:
     def __init__(
         self,
+        dataset: str = "TMAe",
         seg_method: str = "cellpose",
         do_align: bool = True,
         save_overlay: bool = True,
         overlay_dir: Optional[Path] = None,
         expansion_distance: int = 15
     ):
+        self.dataset = dataset
         self.seg_method = seg_method
         self.do_align = do_align
         self.save_overlay = save_overlay
         self.overlay_dir = overlay_dir or (config.batch_output_dir / "overlays")
         self.expansion_distance = expansion_distance
-        
+
         if self.save_overlay:
             self.overlay_dir.mkdir(parents=True, exist_ok=True)
 
     def process(self, block_name: str) -> pd.DataFrame:
-        logger.info(f"Processing block: {block_name}")
-        
+        logger.info(f"Processing block: {self.dataset}/{block_name}")
+
         # 1. 加载数据
-        imgs = load_block(block_name, do_preprocess=True)
+        data = load_block(self.dataset, block_name, do_preprocess=True)
 
-        # 2. 对齐
+        # 2. 提取通道 (TMAe: cycle1; TMAd: cycle1 + cycle2)
+        cycle1 = data["cycle1"]
+        dapi = cycle1["DAPI"]
+
+        # 构建传给 extract_features 的通道字典，key 前缀区分 cycle
+        channels_dict = {ch: cycle1[ch] for ch in cycle1 if ch != "DAPI"}
+
         if self.do_align:
-            dapi = imgs["DAPI"]
-            for ch in ["HER2", "PR", "ER"]:
-                if ch in imgs:
-                    aligned, _, _ = align_by_shift(dapi, imgs[ch])
-                    imgs[ch] = aligned
-                else:
-                    logger.warning(f"Channel {ch} not found in block {block_name}")
+            for ch in list(channels_dict.keys()):
+                aligned, _, _ = align_by_shift(dapi, channels_dict[ch])
+                channels_dict[ch] = aligned
 
-        # 3. 分割
-        masks = segment_nuclei_by_method(imgs["DAPI"], method=self.seg_method)
-        
-        # 4. 获取胞质掩膜 (基于核向外扩张)
+        # TMAd: 加入 cycle2 的 KI67 通道
+        ki67_img = None
+        if "cycle2" in data:
+            cycle2 = data["cycle2"]
+            # cycle2 的 DAPI 用于对齐 KI67，但分割仍用 cycle1 DAPI
+            if "KI67" in cycle2:
+                ki67_img = cycle2["KI67"]
+                if self.do_align and "DAPI" in cycle2:
+                    ki67_img, _, _ = align_by_shift(dapi, ki67_img)
+                channels_dict["KI67"] = ki67_img
+
+        # 3. 分割 (始终用 cycle1 DAPI)
+        masks = segment_nuclei_by_method(dapi, method=self.seg_method)
+
+        # 4. 获取胞质掩膜
         cell_masks, cyto_only_masks = get_cytoplasm_masks(masks, expansion_distance=self.expansion_distance)
 
         # 5. 保存叠加图
         if self.save_overlay:
-            out_tif = self.overlay_dir / f"{block_name}_nuclei_overlay.tif"
-            save_nuclei_overlay(imgs["DAPI"], masks, out_tif, cell_masks=cell_masks)
+            out_tif = self.overlay_dir / f"{self.dataset}_{block_name}_nuclei_overlay.tif"
+            save_nuclei_overlay(dapi, masks, out_tif, cell_masks=cell_masks)
+
+            if ki67_img is not None:
+                ki67_tif = self.overlay_dir / f"{self.dataset}_{block_name}_ki67_overlay.tif"
+                save_ki67_overlay(dapi, masks, ki67_img, ki67_tif)
 
         # 6. 特征提取
-        df = extract_features(block_name, masks, cyto_only_masks, imgs, cell_masks=cell_masks)
-        
+        df = extract_features(block_name, masks, cyto_only_masks, channels_dict, cell_masks=cell_masks)
+
         # 7. 自动评分
         df = score_markers(df)
 
-        if "global_cell_id" not in df.columns:
-            df["global_cell_id"] = df["block"].astype(str) + "_" + df["cell_id"].astype(str)
+        # 8. Ki67 增殖指数 (仅 TMAd)
+        if ki67_img is not None and not df.empty:
+            df["ki67_proliferation_index"] = compute_ki67_index(df)
+            df["ki67_hotspot_proliferation_index"] = compute_ki67_hotspot_index(df)
+
+        # global_cell_id 加入 dataset 前缀，避免 TMAe/TMAd 同名 block 冲突
+        df["dataset"] = self.dataset
+        df["global_cell_id"] = self.dataset + "_" + df["block"].astype(str) + "_" + df["cell_id"].astype(str)
 
         return df
 
-def list_blocks():
-    crop_root = config.crop_root
+
+def list_blocks(dataset: str) -> List[str]:
+    crop_root = config.crop_root / dataset
     if not crop_root.exists():
         raise FileNotFoundError(f"裁剪结果根目录不存在: {crop_root}")
     return sorted([p.name for p in crop_root.iterdir() if p.is_dir()])
 
+
 def run_batch():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", default="TMAe", choices=list(DATASETS.keys()), help="数据集名称")
     parser.add_argument("--seg", default=config.get("SEGMENTATION.MODEL_TYPE", "cellpose"), help="cellpose|stardist|watershed")
     parser.add_argument("--out-tag", default="")
     parser.add_argument("--no-overlay", action="store_true")
@@ -86,9 +114,10 @@ def run_batch():
     parser.add_argument("--resume", action="store_true", help="Skip already processed blocks")
     args = parser.parse_args()
 
+    dataset = args.dataset
     seg_method = str(args.seg).strip().lower()
     out_tag = str(args.out_tag).strip()
-    suffix = f"_{out_tag}" if out_tag else ""
+    suffix = f"_{dataset}_{out_tag}" if out_tag else f"_{dataset}"
 
     out_dir = config.batch_output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -98,9 +127,9 @@ def run_batch():
     overlay_dir = out_dir / f"overlays{suffix}"
     state_csv = out_dir / f"batch_state{suffix}.csv"
 
-    blocks = list_blocks()
-    logger.info(f"Found {len(blocks)} blocks: {blocks}")
-    
+    blocks = list_blocks(dataset)
+    logger.info(f"Dataset: {dataset}, Found {len(blocks)} blocks: {blocks}")
+
     # 断点续跑逻辑
     processed_blocks = set()
     if args.resume and state_csv.exists():
@@ -109,6 +138,7 @@ def run_batch():
         logger.info(f"Resuming: skipping {len(processed_blocks)} already processed blocks.")
 
     processor = BlockProcessor(
+        dataset=dataset,
         seg_method=seg_method,
         do_align=not args.no_align,
         save_overlay=not args.no_overlay,
@@ -119,7 +149,6 @@ def run_batch():
     all_dfs = []
     logs = []
 
-    # 如果是续跑，且最终 CSV 已存在，先读取
     if args.resume and out_csv.exists():
         try:
             all_dfs.append(pd.read_csv(out_csv))
@@ -140,7 +169,7 @@ def run_batch():
                 "n_cells": int(len(df_b)),
                 "error": ""
             })
-            logger.info(f"[OK] {b}: {len(df_b)} cells")
+            logger.info(f"[OK] {dataset}/{b}: {len(df_b)} cells")
 
         except Exception as e:
             logs.append({
@@ -149,10 +178,9 @@ def run_batch():
                 "n_cells": 0,
                 "error": repr(e)
             })
-            logger.error(f"[FAIL] {b}: {e}")
+            logger.error(f"[FAIL] {dataset}/{b}: {e}")
             logger.error(traceback.format_exc())
 
-    # 保存日志和状态
     new_logs_df = pd.DataFrame(logs)
     if args.resume and state_csv.exists():
         old_state_df = pd.read_csv(state_csv)
@@ -161,17 +189,16 @@ def run_batch():
         final_state_df = new_logs_df
 
     final_state_df.to_csv(state_csv, index=False, encoding="utf-8-sig")
-    final_state_df.to_csv(log_csv, index=False, encoding="utf-8-sig") # 保持兼容性
+    final_state_df.to_csv(log_csv, index=False, encoding="utf-8-sig")
 
     if len(all_dfs) == 0:
         logger.warning("No blocks processed successfully, nothing to save.")
         return
 
     df_all = pd.concat(all_dfs, ignore_index=True)
-    # 确保唯一性 (如果续跑时读取了旧的)
     df_all = df_all.drop_duplicates(subset=['global_cell_id'])
 
-    front_cols = ["global_cell_id", "block", "cell_id"]
+    front_cols = ["global_cell_id", "dataset", "block", "cell_id"]
     cols = front_cols + [c for c in df_all.columns if c not in front_cols]
     df_all = df_all[cols]
 

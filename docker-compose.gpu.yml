@@ -19,7 +19,8 @@ services:
       - ./fiji_config.json:/app/fiji_config.json
       - cellpose_cache:/root/.cellpose
       - torch_cache:/root/.cache/torch
-    command: ["micromamba", "run", "-n", "fiji-stitcher", "python", "batch_run_all_to_one.py", "--gpu"]
+      - cjdk_cache:/root/.cache/cjdk
+    command: ["micromamba", "run", "-n", "fiji-stitcher", "python", "batch_run_all_to_one.py"]
     # deploy 部分可以保留，但 runtime 已足够，也可以删除
     deploy:
       resources:
@@ -32,3 +33,4 @@ services:
 volumes:
   cellpose_cache:
   torch_cache:
+  cjdk_cache:

@@ -34,11 +34,23 @@
 
   "SCORING": {
     "POSITIVE_THRESHOLD": 5000,
+    "ER_PR_THRESHOLD_MODE": "otsu",
+    "ER_PR_MIN_POSITIVE_FRACTION": 0.01,
     "HER2_THRESHOLDS": {
       "3+": 15000,
       "2+": 8000,
       "1+": 3000
-    }
+    },
+    "HER2_USE_MEMBRANE_RING": true,
+    "HER2_FALLBACK_TO_CYTO_MEAN": true,
+    "HER2_MEMBRANE_RING_INNER_PX": 1,
+    "HER2_MEMBRANE_RING_OUTER_PX": 4,
+    "KI67_THRESHOLD": null,
+    "KI67_THRESHOLD_MODE": "hotspot_otsu",
+    "KI67_HOTSPOT_N_SEEDS": 3,
+    "KI67_HOTSPOT_MIN_SEP_PX": 20,
+    "KI67_HOTSPOT_RADIUS_PX": 150,
+    "KI67_HOTSPOT_MIN_CELLS": 10
   },
 
   "SEGMENTATION": {

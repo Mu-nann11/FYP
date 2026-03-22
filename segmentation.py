@@ -171,3 +171,32 @@ def save_nuclei_overlay(dapi, masks, out_tif_path, cell_masks=None):
 
     overlay = overlay.clip(0, 65535).astype(np.uint16)
     tifffile.imwrite(str(out_tif_path), overlay)
+
+
+def save_ki67_overlay(dapi, masks, ki67_img, out_tif_path):
+    """
+    Ki67 overlay：绿色=阳性细胞核，红色=阴性细胞核。
+    阈值用 Otsu 自动确定。
+    """
+    from skimage.filters import threshold_otsu
+
+    h, w = masks.shape
+    if dapi.dtype != np.uint16:
+        dapi16 = normalize_to_uint16(dapi)
+    else:
+        dapi16 = dapi
+
+    overlay = np.stack([dapi16, dapi16, dapi16], axis=-1).astype(np.float32)
+
+    # 计算 Ki67 阈值
+    vals = ki67_img[masks > 0]
+    thr = float(threshold_otsu(vals)) if vals.size > 1 else float(ki67_img.max() * 0.5)
+
+    for lab in range(1, int(masks.max()) + 1):
+        region = masks == lab
+        mean_val = float(ki67_img[region].mean()) if region.any() else 0.0
+        color = np.array([0, 65535, 0], dtype=np.float32) if mean_val > thr else np.array([65535, 0, 0], dtype=np.float32)
+        overlay[region] = 0.5 * overlay[region] + 0.5 * color
+
+    overlay = overlay.clip(0, 65535).astype(np.uint16)
+    tifffile.imwrite(str(out_tif_path), overlay)
