@@ -1,7 +1,6 @@
 import torch
 import numpy as np
 import tifffile
-from cellpose import models
 from skimage.segmentation import expand_labels
 from skimage.segmentation import watershed
 from skimage.filters import threshold_otsu
@@ -20,8 +19,15 @@ _STARDIST_MODEL = None
 def get_nuclei_model():
     global _MODEL
     if _MODEL is None:
+        try:
+            from cellpose import models as cp_models
+        except ImportError:
+            raise ImportError(
+                "cellpose 未安装。请运行: pip install cellpose\n"
+                "或在 environment.yml 中添加 cellpose 依赖。"
+            )
         print("Init CellposeModel once. USE_GPU =", USE_GPU)
-        _MODEL = models.CellposeModel(gpu=USE_GPU, model_type="nuclei")
+        _MODEL = cp_models.CellposeModel(gpu=USE_GPU, model_type="nuclei")
     return _MODEL
 
 

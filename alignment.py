@@ -6,7 +6,10 @@ from typing import Tuple, Optional
 def _to_gray(img: np.ndarray) -> np.ndarray:
     """Convert to single-channel float32 grayscale."""
     if img.ndim == 3:
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        if img.shape[2] == 4:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
+        else:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     else:
         gray = img
     return gray.astype(np.float32)

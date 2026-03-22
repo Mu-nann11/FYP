@@ -14,8 +14,19 @@ from report_generator import generate_report
 from utils import get_logger
 from config import config
 
-# 获取统一日志记录器
-logger = get_logger("batch_run", log_file=config.batch_output_dir / "batch_run.log")
+# logger 延迟到 run_batch() 中初始化，避免模块 import 时因目录权限问题崩溃
+logger = None
+
+
+def _get_logger():
+    global logger
+    if logger is None:
+        try:
+            logger = get_logger("batch_run", log_file=config.batch_output_dir / "batch_run.log")
+        except Exception:
+            # 目录创建失败时退化为无文件日志
+            logger = get_logger("batch_run")
+    return logger
 
 class BlockProcessor:
     def __init__(
@@ -42,7 +53,8 @@ class BlockProcessor:
             self.overlay_dir.mkdir(parents=True, exist_ok=True)
 
     def process(self, block_name: str) -> pd.DataFrame:
-        logger.info(f"Processing block: {self.dataset}/{block_name}")
+        log = _get_logger()
+        log.info(f"Processing block: {self.dataset}/{block_name}")
 
         # 1. 加载数据
         data = load_block(self.dataset, block_name, do_preprocess=True)
@@ -58,7 +70,7 @@ class BlockProcessor:
             for ch in list(channels_dict.keys()):
                 aligned, _, info = align(dapi, channels_dict[ch], method=self.align_method)
                 channels_dict[ch] = aligned
-                logger.info(f"  Alignment [{ch}]: method={info.get('method')}, "
+                log.info(f"  Alignment [{ch}]: method={info.get('method')}, "
                             f"MI={info.get('mutual_information', 'N/A'):.3f}, "
                             f"NCC={info.get('ncc', 'N/A'):.3f}")
 
@@ -71,7 +83,7 @@ class BlockProcessor:
                 ki67_img = cycle2["KI67"]
                 if self.do_align and "DAPI" in cycle2:
                     ki67_img, _, info = align(dapi, ki67_img, method=self.align_method)
-                    logger.info(f"  Alignment [KI67]: method={info.get('method')}, "
+                    log.info(f"  Alignment [KI67]: method={info.get('method')}, "
                                 f"MI={info.get('mutual_information', 'N/A'):.3f}, "
                                 f"NCC={info.get('ncc', 'N/A'):.3f}")
                 channels_dict["KI67"] = ki67_img
@@ -83,12 +95,12 @@ class BlockProcessor:
         if self.sam_refine:
             sam_min_area = int(config.get("SEGMENTATION.SAM_MIN_AREA", 50))
             sam_box_pad = int(config.get("SEGMENTATION.SAM_BOX_PAD", 3))
-            logger.info(f"  SAM refinement: min_area={sam_min_area}, box_pad={sam_box_pad}")
+            log.info(f"  SAM refinement: min_area={sam_min_area}, box_pad={sam_box_pad}")
             try:
                 masks = refine_masks_with_sam(dapi, masks, min_area=sam_min_area, box_pad=sam_box_pad)
-                logger.info(f"  SAM refinement done: {int(masks.max())} labels")
+                log.info(f"  SAM refinement done: {int(masks.max())} labels")
             except (ImportError, FileNotFoundError) as e:
-                logger.warning(f"  SAM refinement skipped: {e}")
+                log.warning(f"  SAM refinement skipped: {e}")
                 print(f"⚠️ SAM refinement skipped: {e}")
 
         # 4. 获取胞质掩膜
@@ -126,7 +138,7 @@ class BlockProcessor:
                     out_tif_path=hotspot_tif,
                     per_hotspot_stats=per_hotspot,
                 )
-                logger.info(f"  Ki67 hotspot overlay saved: {hotspot_tif}")
+                log.info(f"  Ki67 hotspot overlay saved: {hotspot_tif}")
 
         # global_cell_id 加入 dataset 前缀，避免 TMAe/TMAd 同名 block 冲突
         df["dataset"] = self.dataset
@@ -143,6 +155,7 @@ def list_blocks(dataset: str) -> List[str]:
 
 
 def run_batch():
+    log = _get_logger()
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", default="TMAe", choices=list(DATASETS.keys()), help="数据集名称")
     parser.add_argument("--seg", default=config.get("SEGMENTATION.MODEL_TYPE", "cellpose"), help="cellpose|stardist|watershed")
@@ -174,14 +187,14 @@ def run_batch():
     state_csv = out_dir / f"batch_state{suffix}.csv"
 
     blocks = list_blocks(dataset)
-    logger.info(f"Dataset: {dataset}, Found {len(blocks)} blocks: {blocks}")
+    log.info(f"Dataset: {dataset}, Found {len(blocks)} blocks: {blocks}")
 
     # 断点续跑逻辑
     processed_blocks = set()
     if args.resume and state_csv.exists():
         state_df = pd.read_csv(state_csv)
         processed_blocks = set(state_df[state_df['status'] == 'OK']['block'].tolist())
-        logger.info(f"Resuming: skipping {len(processed_blocks)} already processed blocks.")
+        log.info(f"Resuming: skipping {len(processed_blocks)} already processed blocks.")
 
     processor = BlockProcessor(
         dataset=dataset,
@@ -201,7 +214,7 @@ def run_batch():
         try:
             all_dfs.append(pd.read_csv(out_csv))
         except Exception as e:
-            logger.error(f"Failed to read existing CSV for resume: {e}")
+            log.error(f"Failed to read existing CSV for resume: {e}")
 
     for b in blocks:
         if b in processed_blocks:
@@ -217,7 +230,7 @@ def run_batch():
                 "n_cells": int(len(df_b)),
                 "error": ""
             })
-            logger.info(f"[OK] {dataset}/{b}: {len(df_b)} cells")
+            log.info(f"[OK] {dataset}/{b}: {len(df_b)} cells")
 
         except Exception as e:
             logs.append({
@@ -226,8 +239,8 @@ def run_batch():
                 "n_cells": 0,
                 "error": repr(e)
             })
-            logger.error(f"[FAIL] {dataset}/{b}: {e}")
-            logger.error(traceback.format_exc())
+            log.error(f"[FAIL] {dataset}/{b}: {e}")
+            log.error(traceback.format_exc())
 
     new_logs_df = pd.DataFrame(logs)
     if args.resume and state_csv.exists():
@@ -240,7 +253,7 @@ def run_batch():
     final_state_df.to_csv(log_csv, index=False, encoding="utf-8-sig")
 
     if len(all_dfs) == 0:
-        logger.warning("No blocks processed successfully, nothing to save.")
+        log.warning("No blocks processed successfully, nothing to save.")
         return
 
     df_all = pd.concat(all_dfs, ignore_index=True)
@@ -251,21 +264,21 @@ def run_batch():
     df_all = df_all[cols]
 
     df_all.to_csv(out_csv, index=False, encoding="utf-8-sig")
-    logger.info(f"Saved total CSV: {out_csv}")
-    logger.info(f"Total cells: {len(df_all)}")
-    logger.info(f"Overlays saved to: {overlay_dir}")
+    log.info(f"Saved total CSV: {out_csv}")
+    log.info(f"Total cells: {len(df_all)}")
+    log.info(f"Overlays saved to: {overlay_dir}")
 
     # =====================================================
     # Patient-level ER/PR aggregation
     # =====================================================
-    logger.info("Aggregating ER/PR scores to patient level...")
+    log.info("Aggregating ER/PR scores to patient level...")
     min_pos_frac = float(config.get("SCORING.ER_PR_MIN_POSITIVE_FRACTION", 0.01))
     patient_df = aggregate_to_patient(df_all, min_pos_fraction=min_pos_frac)
     patient_df.to_csv(patient_csv, index=False, encoding="utf-8-sig")
-    logger.info(f"Saved patient-level scores: {patient_csv}")
-    logger.info(f"Patients: {patient_df['patient_id'].nunique()}")
+    log.info(f"Saved patient-level scores: {patient_csv}")
+    log.info(f"Patients: {patient_df['patient_id'].nunique()}")
     for _, row in patient_df.iterrows():
-        logger.info(f"  {row['patient_id']} / {row['marker']}: "
+        log.info(f"  {row['patient_id']} / {row['marker']}: "
                      f"{row['patient_status']} "
                      f"(positive fraction={row['positive_fraction']:.4f}, "
                      f"n={row['total_cells']}, blocks={row['n_blocks']})")
@@ -274,7 +287,7 @@ def run_batch():
     # Cohen's kappa vs QuPath (if reference provided)
     # =====================================================
     if args.qupath_csv:
-        logger.info(f"Computing Cohen's kappa vs QuPath: {args.qupath_csv}")
+        log.info(f"Computing Cohen's kappa vs QuPath: {args.qupath_csv}")
         try:
             qupath_df = pd.read_csv(args.qupath_csv, encoding="utf-8-sig")
 
@@ -283,9 +296,9 @@ def run_batch():
             if not kappa_block.empty:
                 kappa_block_path = out_dir / f"kappa_cell_level{suffix}.csv"
                 kappa_block.to_csv(kappa_block_path, index=False, encoding="utf-8-sig")
-                logger.info(f"Cell-level kappa saved: {kappa_block_path}")
+                log.info(f"Cell-level kappa saved: {kappa_block_path}")
                 for _, row in kappa_block.iterrows():
-                    logger.info(f"  {row['marker']}: kappa={row.get('kappa', 'N/A')}, "
+                    log.info(f"  {row['marker']}: kappa={row.get('kappa', 'N/A')}, "
                                 f"agreement={row.get('agreement_rate', 'N/A')}, "
                                 f"n={row.get('n_samples', 0)}")
 
@@ -294,15 +307,15 @@ def run_batch():
                 kappa_patient = patient_level_kappa(patient_df, qupath_df)
                 kappa_patient_path = out_dir / f"kappa_patient_level{suffix}.csv"
                 kappa_patient.to_csv(kappa_patient_path, index=False, encoding="utf-8-sig")
-                logger.info(f"Patient-level kappa saved: {kappa_patient_path}")
+                log.info(f"Patient-level kappa saved: {kappa_patient_path}")
                 for _, row in kappa_patient.iterrows():
-                    logger.info(f"  {row['marker']}: kappa={row['kappa']}, "
+                    log.info(f"  {row['marker']}: kappa={row['kappa']}, "
                                 f"agreement={row['agreement_rate']}, "
                                 f"n_patients={row['n_patients']}")
 
         except Exception as e:
-            logger.error(f"Kappa computation failed: {e}")
-            logger.error(traceback.format_exc())
+            log.error(f"Kappa computation failed: {e}")
+            log.error(traceback.format_exc())
             print(f"⚠️ Kappa computation failed: {e}")
 
     # =====================================================
@@ -324,12 +337,12 @@ def run_batch():
                 out_html=report_path,
                 title=f"TMA {dataset} Analysis Report",
             )
-            logger.info(f"HTML report: {report_path}")
+            log.info(f"HTML report: {report_path}")
             print(f"📊 Report: {report_path}")
         except Exception as e:
-            logger.error(f"Report generation failed: {e}")
+            log.error(f"Report generation failed: {e}")
 
-    logger.info("Batch run complete.")
+    log.info("Batch run complete.")
 
 if __name__ == "__main__":
     run_batch()

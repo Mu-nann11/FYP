@@ -124,10 +124,11 @@ def generate_report(
     # Overlay images
     overlay_images = []
     if overlay_dir and Path(overlay_dir).exists():
-        for img in sorted(Path(overlay_dir).glob("*.png")):
-            b64 = _fig_to_base64(img)
-            if b64:
-                overlay_images.append({"name": img.name, "src": b64})
+        for ext in ("*.png", "*.tif", "*.tiff"):
+            for img in sorted(Path(overlay_dir).glob(ext)):
+                b64 = _fig_to_base64(img)
+                if b64:
+                    overlay_images.append({"name": img.name, "src": b64})
 
     # ---- Build chart data ----
     # ER/PR per-block bar chart
@@ -146,6 +147,7 @@ def generate_report(
     her2_0 = [s.get("her2_0", 0) for s in block_stats]
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    n_patients = pd.DataFrame(patient_rows)["patient_id"].nunique() if patient_rows else 0
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -304,7 +306,7 @@ def generate_report(
     <div class="label">Blocks</div>
   </div>
   <div class="stat-card">
-    <div class="number">{len(patient_rows) // 2 if patient_rows else '—'}</div>
+    <div class="number">{n_patients if n_patients else '—'}</div>
     <div class="label">Patients</div>
   </div>
   <div class="stat-card">
